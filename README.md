@@ -1,51 +1,48 @@
-# Residual RL for Tokamak Pellet Injection
+# Full Residual RL for Tokamak Pellet Injection
 
-面向托卡马克 pellet injection 控制的强化学习与物理仿真项目。仓库将 `torax` 等离子体输运模拟、pellet 沉积模型与 residual reinforcement learning 训练流程集成到统一工作流中，用于研究固定注入节拍上的残差控制策略。
+面向托卡马克 pellet injection 控制的强化学习与物理仿真项目。该仓库将 `torax` 等离子体输运模拟、pellet 沉积模型和 PPO 训练流程集成在同一套 batch 仿真框架中，用于研究注入时机、注入速度和 pellet 厚度的联合学习。
 
-## 项目概览
+## Overview
 
-本项目关注的不是“从零开始决定每一次是否注入”，而是在一个可解释、可复现的基线注入节拍上学习小幅修正：
+项目核心是一个 full residual controller。策略并不直接输出底层物理执行器的完整动作，而是围绕一个可解释的基线计划，学习三类残差修正：
 
-- 基线控制器负责注入时机
-- RL 策略负责修正注入速度与 pellet 厚度
-- 环境在批量并行仿真上运行，适合 PPO 等 on-policy 算法
-- 训练和评估均可直接复用同一套物理配置
+- 下一次注入间隔
+- 注入速度
+- pellet 厚度
 
-这种设计兼顾了物理先验、训练稳定性和策略可解释性，适合做基线对照、超参数实验和控制策略分析。
+环境据此生成事件级注入计划，并在多个 simulator step 上执行。这种设计兼顾了物理先验、控制可解释性和训练稳定性，适合做调度策略、密度控制和聚变性能对比实验。
 
-## 核心特性
+## Core Features
 
-- Residual action design：策略只输出二维残差动作，分别对应速度和厚度修正
-- Warm-start training：训练默认经过约 2 秒物理时间预热，再从稳定启动状态开始控制
-- Batched simulation：底层环境原生支持 batch，并通过 SB3 接口映射为并行环境
-- Physics-aware reward：奖励综合考虑三乘积、`Q_fusion`、密度/温度约束与 pellet 使用代价
-- Safety termination：对非物理或数值异常状态进行提前终止
-- Visualization support：提供 PyQt 桌面程序做并行仿真与结果可视化
+- Full residual action space：同时学习 timing, velocity, thickness 三维控制量
+- Event-level scheduling：策略在 planner 触发时生成下一次注入计划，而不是逐步硬编码触发信号
+- Warm-start training：训练默认先经过约 2 秒物理预热，再从稳定状态开始控制
+- Macro-step RL rollout：支持 `sim_steps_per_rl_step`，用单次策略决策驱动多个物理步
+- Batched simulation：底层环境原生支持 batch，并通过 SB3 适配为并行环境
+- Physics-aware reward：奖励结合三乘积、`Q_fusion`、密度/温度约束与注入代价
+- Visualization workflow：提供 PyQt 可视化界面做并行仿真与结果查看
 
-## 仓库结构
+## Repository Layout
 
-- `rl_residual_lab/`
-  residual RL 的主要入口，包括训练、评估与实验脚本
+- `rl_lab/`
+  PPO 训练、评估和 full residual 环境封装
 
 - `RL/`
-  通用环境封装、reward、VecEnv 适配器
+  通用 batch 环境、reward 和 VecEnv 适配器
 
 - `simulator/`
-  物理模拟核心，包括 `torax` 侧输运求解与 pellet 沉积模型
+  物理模拟核心，包括 `torax` 输运求解和 pellet 沉积实现
 
 - `Examples/`
-  不经过 RL 的并行仿真示例，适合先做环境连通性与依赖验证
+  不经过 RL 的并行仿真脚本，用于快速验证模拟器行为
 
 - `visualization/`
-  PyQt 图形界面，用于交互式仿真和结果查看
+  PyQt 图形界面，用于交互式仿真和结果可视化
 
 - `config/ITER.py`
   默认 ITER-like 配置
 
-- `requirement.txt`
-  Python 依赖列表
-
-## 环境准备
+## Installation
 
 推荐使用项目脚本默认的 conda 环境：
 
@@ -54,7 +51,7 @@ conda activate Nuclear
 python3 -m pip install -r requirement.txt
 ```
 
-主要依赖包括：
+主要依赖：
 
 - `torch`
 - `jax`
@@ -64,69 +61,84 @@ python3 -m pip install -r requirement.txt
 - `PyQt5`
 - `pyqtgraph`
 
-首次在新机器上运行时，建议先从 `Examples/` 中的小规模 CPU 任务开始，确认依赖、JAX 后端与本地二进制扩展均可正常工作。
+首次部署到新机器时，建议先从 `Examples/` 中的小规模 CPU 任务开始，确认 JAX 后端和本地扩展都能正常工作。
 
-## Residual RL 机制
+## Full Residual Environment
 
-### 控制形式
+full residual 环境定义在 [full_residual_env.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_lab/full_residual_env.py)。
 
-环境对策略暴露的是二维 residual 动作：
+### Action Space
 
-- `delta_velocity`
-- `delta_thickness`
+策略输出三维残差动作：
 
-环境内部会把这两个量与固定基线参数组合成完整控制动作：
+- `delta_interval_steps`
+- `delta_velocity_mps`
+- `delta_thickness_mm`
 
-- `trigger`
-- `velocity`
-- `thickness`
+环境内部会把残差与基线计划组合，得到下一次注入事件的完整参数。默认基线包括：
 
-默认基线参数为：
+- `base_interval_steps = 100`
+- `baseline_velocity = 300 m/s`
+- `baseline_thickness_mm = 2.0`
 
-- 注入周期 `inject_every = 100`
-- 单次注入持续 `inject_duration = 1`
-- 基线速度 `300 m/s`
-- 基线厚度 `2.0 mm`
+默认残差范围包括：
 
-当控制步不处于注入窗口内时，环境会自动关闭注入，residual 动作不会被应用到物理系统。
+- 间隔修正 `[-20, 20]` steps
+- 速度修正 `[-50, 50] m/s`
+- 厚度修正 `[-0.5, 0.5] mm`
 
-### Warm-start 训练
+### Planner Logic
 
-训练环境默认先执行 `warmup_steps = 2000` 步。结合 [config/ITER.py](/Users/sheldonwang/residual-RL-pellet-injection/config/ITER.py) 中的 `fixed_dt = 0.001`，这对应约 2 秒物理时间。
+环境维护一个 event planner：
 
-预热结束后，环境会缓存等离子体状态。后续训练 episode 在 reset 时直接回到该 warm-start 状态，而不是反复从冷启动开始。这能显著减少启动瞬态对 PPO 训练的干扰。
+- 当 `planner_due` 为真时，策略给出下一次注入计划
+- 计划包含下一次注入间隔、速度和厚度
+- 到达计划时刻时触发注入
+- 注入事件执行后，planner 重新进入待规划状态
 
-### 观测
+因此，注入时机已经成为 RL 直接学习的一部分，而不是固定节拍上的外部规则。
 
-基础观测由 [RL/env.py](/Users/sheldonwang/residual-RL-pellet-injection/RL/env.py) 提供，会把输运状态树与诊断输出展开为 `(B, D)` 形式的数值特征。
+### Warm Start and Macro Steps
 
-启用 `--append-schedule-features` 后，环境还会拼接 4 个节拍特征：
+训练默认先执行 `warmup_steps = 2000`。结合 [ITER.py](/Users/sheldonwang/residual-RL-pellet-injection/config/ITER.py) 中的 `fixed_dt = 0.001`，对应约 2 秒物理时间。
 
-- `sin(phase)`
-- `cos(phase)`
-- `inject_now`
-- `control_active`
+预热结束后，环境缓存等离子体状态。训练 episode reset 时直接回到 warm-start 状态，从而减少冷启动瞬态对 PPO 的干扰。
 
-### Reward 与安全终止
+此外，`sim_steps_per_rl_step` 允许一次策略决策执行多个物理步。这有助于降低决策频率，并让 RL 更像事件级调度器而不是毫秒级开关控制器。
 
-Reward 实现在 [RL/reward.py](/Users/sheldonwang/residual-RL-pellet-injection/RL/reward.py)，主要关注：
+### Observations
+
+基础观测由 [env.py](/Users/sheldonwang/residual-RL-pellet-injection/RL/env.py) 提供，会把输运状态和诊断输出展开为 `(B, D)` 的数值特征。
+
+启用 `--append-scheduler-features` 后，还会附加调度相关特征，包括：
+
+- 调度相位的正余弦编码
+- 距离下一次注入的归一化时间
+- 当前计划间隔
+- planner 是否等待新计划
+- 当前控制是否已激活
+- 最近一次实际注入的速度和厚度比例
+
+### Reward and Safety
+
+奖励定义在 [reward.py](/Users/sheldonwang/residual-RL-pellet-injection/RL/reward.py)，主要考虑：
 
 - 聚变三乘积 `n T tau_E`
 - `Q_fusion`
 - Greenwald fraction 约束
 - 电子/离子体平均温度范围
-- pellet 使用量和注入速度带来的代价
+- pellet 使用量和控制代价
 
-环境会对明显异常的状态进行安全终止，例如：
+环境会对明显异常的状态提前终止，例如：
 
 - 非有限数值
 - 非正密度或温度
 - Greenwald fraction 过高
 - 核心温度异常偏低或偏高
 
-## 快速开始
+## Quick Start
 
-### 原始模拟器示例
+### Raw Simulator Examples
 
 无注入基线：
 
@@ -140,87 +152,76 @@ python3 Examples/no_injection.py --device cpu --batch-size 2 --run-steps 10
 python3 Examples/random_injection.py --device cpu --batch-size 2 --run-steps 10 --inject-prob 0.05
 ```
 
-固定节拍注入：
+固定间隔注入：
 
 ```bash
 python3 Examples/interval_injiction.py --device cpu --batch-size 2 --run-steps 10 --inject-every 100 --inject-duration 1 --inject-fraction 0.2
 ```
 
-示例脚本会将摘要与配置保存到 `example_logs/`。
+这些脚本会将摘要和配置保存到 `example_logs/`。
 
-### PPO 训练
+### PPO Training
 
-直接运行训练入口：
+训练入口位于 [train_full_residual.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_lab/train_full_residual.py)。
+
+一个最小化示例：
 
 ```bash
-python3 rl_residual_lab/train_residual.py \
+python3 rl_lab/train_full_residual.py \
   --torax-config config/ITER.py \
   --device cpu \
   --batch-size 4 \
   --max-steps 1000 \
   --warmup-steps 2000 \
-  --inject-every 100 \
-  --inject-duration 1 \
+  --sim-steps-per-rl-step 10 \
+  --base-interval-steps 100 \
+  --min-interval-steps 20 \
+  --max-interval-steps 200 \
   --baseline-velocity 300 \
   --baseline-thickness-mm 2.0 \
+  --residual-interval-max 20.0 \
   --residual-velocity-max 50.0 \
   --residual-thickness-mm-max 0.5 \
   --total-timesteps 10000
 ```
 
-使用默认训练脚本：
-
-```bash
-bash rl_residual_lab/run_train_residual.sh
-```
-
-CPU 调试版本：
-
-```bash
-bash rl_residual_lab/run_train_residual_cpu.sh
-```
-
-训练产物默认保存在：
+训练输出默认保存在：
 
 - `rl_logs/<run_name>/`
 - `rl_models/<run_name>/`
 
-常见输出包括：
+常见产物包括：
 
 - `config.json`
 - `monitor.csv`
 - `tensorboard/`
-- `train.stdout.log`
 - `checkpoint_*.zip`
 - `final_model.zip`
 
-### 模型评估
+### Policy Evaluation
 
-评估训练好的 residual 策略：
+评估入口位于 [eval_full_residual.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_lab/eval_full_residual.py)。
+
+评估一个训练好的模型：
 
 ```bash
-python3 rl_residual_lab/eval_residual.py \
+python3 rl_lab/eval_full_residual.py \
   --model-path rl_models/<run_name>/final_model.zip \
   --device cpu \
   --batch-size 1 \
   --eval-steps 10000 \
+  --sim-steps-per-rl-step 10 \
   --deterministic
 ```
 
-也可以使用封装脚本：
-
-```bash
-bash rl_residual_lab/run_eval_residual_model.sh rl_models/<run_name>/final_model.zip cpu
-```
-
-若不提供 `--model-path`，评估脚本会使用零残差策略，作为固定基线控制器的对照。
+如果不提供 `--model-path`，评估脚本会使用零残差策略，作为 full residual 基线控制器的对照。
 
 评估结果默认写入 `eval_logs/`，包括：
 
 - `<run_name>_config.json`
 - `<run_name>_summary.json`
 
-## 可视化界面
+## Visualization
 
 启动桌面程序：
 
@@ -236,26 +237,26 @@ python3 visualization/app.py
 - 查看时间序列、径向 profile 和极向截面图
 - 保存运行结果到 `visualization/runs/<run_id>/`
 
-## 默认配置
+## Default Configuration
 
-默认实验场景位于 [config/ITER.py](/Users/sheldonwang/residual-RL-pellet-injection/config/ITER.py)，当前特征包括：
+默认实验场景位于 [ITER.py](/Users/sheldonwang/residual-RL-pellet-injection/config/ITER.py)，当前包含：
 
-- 时间步长 `1 ms`
-- 总时长 `t_final = 100`
+- `1 ms` 时间步长
+- `t_final = 100`
 - ITER-like 几何参数
-- 已集成温度、密度、热输运与源项的实验配置
+- 面向密度、温度和热输运实验的源项与输运配置
 
-你也可以替换为其他配置文件，并在 `Examples/`、`rl_residual_lab/` 与 `visualization/` 三条工作流中复用。
+你可以替换为其他配置文件，并在 `Examples/`、`rl_lab/` 和 `visualization/` 三条工作流中复用。
 
-## 主要入口文件
+## Main Entry Points
 
-- [rl_residual_lab/train_residual.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_residual_lab/train_residual.py)
-- [rl_residual_lab/eval_residual.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_residual_lab/eval_residual.py)
-- [rl_residual_lab/residual_env.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_residual_lab/residual_env.py)
-- [RL/env.py](/Users/sheldonwang/residual-RL-pellet-injection/RL/env.py)
-- [RL/reward.py](/Users/sheldonwang/residual-RL-pellet-injection/RL/reward.py)
-- [visualization/app.py](/Users/sheldonwang/residual-RL-pellet-injection/visualization/app.py)
+- [train_full_residual.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_lab/train_full_residual.py)
+- [eval_full_residual.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_lab/eval_full_residual.py)
+- [full_residual_env.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_lab/full_residual_env.py)
+- [env.py](/Users/sheldonwang/residual-RL-pellet-injection/RL/env.py)
+- [reward.py](/Users/sheldonwang/residual-RL-pellet-injection/RL/reward.py)
+- [app.py](/Users/sheldonwang/residual-RL-pellet-injection/visualization/app.py)
 
-## 致谢
+## Acknowledgement
 
-底层输运模拟工作流建立在 [Google DeepMind Torax](https://github.com/google-deepmind/torax) 相关生态之上，pellet injection 与 residual RL 控制部分为本项目的研究实现。
+底层输运模拟工作流建立在 [Google DeepMind Torax](https://github.com/google-deepmind/torax) 相关生态之上，pellet injection 与 full residual RL 控制部分为本项目的研究实现。
