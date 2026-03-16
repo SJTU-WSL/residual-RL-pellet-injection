@@ -1,0 +1,25 @@
+# Core numerical and ML dependencies
+numpy
+scipy
+matplotlib
+torch
+pandas
+
+# RL stack
+stable-baselines3
+
+# JAX-based simulator stack
+jax
+jaxlib
+xarray
+torax
+
+# Geometry/contour utilities
+contourpy
+
+# Optional visualization UI
+PyQt5
+pyqtgraph
+
+# Optional legacy dependency (used in eqdsk helper)
+omfit-classes

@@ -1,0 +1,23 @@
+rl_models/
+__pycache__/random.cpython-311.pyc
+__pycache__/run_loop_sim.cpython-311.pyc
+
+config/__pycache__/
+eval_logs
+
+Examples/__pycache__/
+jax_cache_dir/
+legacy_root_scripts/
+RL/__pycache__
+RL/wrappers/__pycache__/
+rl_labs/__pycache__/
+simulator/__pycache__/
+simulator/config/__pycache__/
+simulator/src/__pycache__/
+.runtime_cache/
+visualization/__pycache__/
+visualization/.runtime_cache/
+visualization/runs/
+plot/
+rl_logs/
+visualization/simulation data/
