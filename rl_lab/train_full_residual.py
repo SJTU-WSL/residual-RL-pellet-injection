@@ -23,7 +23,7 @@ except Exception as exc:  # pragma: no cover
     raise ImportError("stable-baselines3 is required to run train_full_residual.py") from exc
 
 from RL.vec_env import BatchAsVecEnv
-from rl_full_residual_lab.full_residual_env import make_full_residual_env_fn
+from rl_lab.full_residual_env import make_full_residual_env_fn
 
 
 def resolve_project_path(path_str: str) -> Path:

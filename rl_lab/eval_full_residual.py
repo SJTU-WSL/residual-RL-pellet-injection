@@ -1,4 +1,4 @@
-"""Evaluate a fixed-interval residual pellet-injection policy."""
+"""Evaluate timing/velocity/thickness full residual policy."""
 from __future__ import annotations
 
 import argparse
@@ -19,17 +19,15 @@ try:
     from stable_baselines3 import PPO
     from stable_baselines3.common.utils import set_random_seed
 except Exception as exc:  # pragma: no cover
-    raise ImportError("stable-baselines3 is required to run eval_residual.py") from exc
+    raise ImportError("stable-baselines3 is required to run eval_full_residual.py") from exc
 
 from RL.vec_env import BatchAsVecEnv
-from rl_residual_lab.residual_env import make_residual_env_fn, zero_residual_action
+from rl_lab.full_residual_env import make_full_residual_env_fn, zero_full_residual_action
 
 
 def resolve_project_path(path_str: str) -> Path:
     path = Path(path_str)
-    if path.is_absolute():
-        return path
-    return PROJECT_ROOT / path
+    return path if path.is_absolute() else (PROJECT_ROOT / path)
 
 
 def to_numpy(value: Any) -> np.ndarray:
@@ -71,35 +69,38 @@ def aggregate_infos(info_history: list[dict[str, Any]]) -> dict[str, float]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate residual PPO on a fixed pellet schedule.")
-    parser.add_argument("--model-path", default=None, help="Optional PPO model path (.zip). If omitted, evaluate zero residual baseline.")
+    parser = argparse.ArgumentParser(description="Evaluate PPO with timing/velocity/thickness residual control.")
+    parser.add_argument("--model-path", default=None, help="Optional PPO model path (.zip). If omitted, evaluate zero-residual baseline.")
     parser.add_argument("--torax-config", default="config/ITER.py")
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--max-steps", type=int, default=10_000, help="Full evaluation horizon, including warmup.")
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--max-steps", type=int, default=10_000, help="Post-warmup control horizon during eval.")
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--warmup-steps", type=int, default=2_000)
+    parser.add_argument("--sim-steps-per-rl-step", type=int, default=10)
     parser.add_argument("--num-stack", type=int, default=1)
-    parser.add_argument("--eval-steps", type=int, default=10_000)
+    parser.add_argument("--eval-steps", type=int, default=10_000, help="Physical simulator steps to evaluate.")
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--print-every", type=int, default=100)
     parser.add_argument("--save-dir", default="eval_logs")
     parser.add_argument("--run-name", default=None)
 
-    parser.add_argument("--inject-every", type=int, default=100)
+    parser.add_argument("--base-interval-steps", type=int, default=100)
     parser.add_argument("--inject-duration", type=int, default=1)
+    parser.add_argument("--min-interval-steps", type=int, default=20)
+    parser.add_argument("--max-interval-steps", type=int, default=200)
     parser.add_argument("--baseline-velocity", type=float, default=300.0)
     parser.add_argument("--baseline-thickness-mm", type=float, default=2.0)
+    parser.add_argument("--residual-interval-max", type=float, default=20.0)
     parser.add_argument("--residual-velocity-max", type=float, default=50.0)
     parser.add_argument("--residual-thickness-mm-max", type=float, default=0.5)
-    parser.add_argument("--append-schedule-features", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--append-scheduler-features", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--normalize-actions", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-
     if args.device is None:
         args.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -110,15 +111,14 @@ def main() -> None:
     if model_path is not None and not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
-    policy_name = "zero_residual_baseline" if model_path is None else "ppo_residual"
+    policy_name = "zero_full_residual_baseline" if model_path is None else "ppo_full_residual"
     run_name = args.run_name or f"{policy_name}_{time.strftime('%Y%m%d_%H%M%S')}"
 
     set_random_seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    config_path = save_dir / f"{run_name}_config.json"
-    with config_path.open("w", encoding="utf-8") as f:
+    with (save_dir / f"{run_name}_config.json").open("w", encoding="utf-8") as f:
         json.dump(
             {
                 **vars(args),
@@ -130,22 +130,26 @@ def main() -> None:
             indent=2,
         )
 
-    env_fn = make_residual_env_fn(
+    env_fn = make_full_residual_env_fn(
         torax_config=torax_config,
         batch_size=args.batch_size,
         episode_steps=args.max_steps,
         device=args.device,
         seed=args.seed,
         warmup_steps=args.warmup_steps,
+        sim_steps_per_rl_step=args.sim_steps_per_rl_step,
         num_stack=args.num_stack,
-        inject_every=args.inject_every,
+        base_interval_steps=args.base_interval_steps,
         inject_duration=args.inject_duration,
+        min_interval_steps=args.min_interval_steps,
+        max_interval_steps=args.max_interval_steps,
         base_velocity_mps=args.baseline_velocity,
         base_thickness_mm=args.baseline_thickness_mm,
+        residual_interval_max=args.residual_interval_max,
         residual_velocity_max=args.residual_velocity_max,
         residual_thickness_mm_max=args.residual_thickness_mm_max,
         normalize_actions=args.normalize_actions,
-        append_schedule_features=args.append_schedule_features,
+        append_scheduler_features=args.append_scheduler_features,
         reset_to_cached_warm_state=False,
     )
     base_env = env_fn()
@@ -163,26 +167,39 @@ def main() -> None:
     current_episode_step = 0
     start_time = time.time()
 
-    for step in range(args.eval_steps):
+    target_sim_steps = int(args.eval_steps)
+    sim_steps_done = 0
+    rl_steps_done = 0
+
+    while sim_steps_done < target_sim_steps:
         if model is None:
-            action = zero_residual_action(args.batch_size)
+            action = zero_full_residual_action(args.batch_size)
         else:
             action, _ = model.predict(obs, deterministic=args.deterministic)
 
         obs, rewards, dones, infos = vec_env.step(action)
-
         rewards = np.asarray(rewards, dtype=np.float64).reshape(args.batch_size)
         current_episode_reward += rewards
-        current_episode_step += 1
+        macro_steps = 0
+        if infos:
+            try:
+                macro_steps = int(np.max([int(info.get("macro_steps_executed", 1)) for info in infos]))
+            except Exception:
+                macro_steps = 1
+        macro_steps = max(1, macro_steps)
+        sim_steps_done += macro_steps
+        rl_steps_done += 1
+        current_episode_step += macro_steps
         reward_history.append(rewards.copy())
         action_history.append(np.asarray(action, dtype=np.float64).copy())
         info_history.extend(infos)
 
-        if step % max(1, args.print_every) == 0:
+        if rl_steps_done == 1 or rl_steps_done % max(1, args.print_every) == 0:
             elapsed = time.time() - start_time
-            sps = (step + 1) / elapsed if elapsed > 0 else 0.0
+            sps = sim_steps_done / elapsed if elapsed > 0 else 0.0
             print(
-                f"[step {step:5d}] reward_mean={float(np.mean(rewards)):+.6f} "
+                f"[sim_step {sim_steps_done:5d} | rl_step {rl_steps_done:4d}] "
+                f"reward_mean={float(np.mean(rewards)):+.6f} "
                 f"action_mean={float(np.mean(action)):+.6f} sps={sps:.1f}"
             )
 
@@ -201,15 +218,16 @@ def main() -> None:
 
     reward_all = np.concatenate([r.reshape(-1) for r in reward_history], axis=0) if reward_history else np.empty((0,))
     action_all = np.concatenate([a.reshape(-1) for a in action_history], axis=0) if action_history else np.empty((0,))
-    episode_reward_all = (
-        np.concatenate([r.reshape(-1) for r in episode_rewards], axis=0) if episode_rewards else np.empty((0,))
-    )
+    episode_reward_all = np.concatenate([r.reshape(-1) for r in episode_rewards], axis=0) if episode_rewards else np.empty((0,))
     info_summary = aggregate_infos(info_history)
 
     summary = {
         "run_name": run_name,
         "policy": policy_name,
         "eval_steps": args.eval_steps,
+        "sim_steps_per_rl_step": args.sim_steps_per_rl_step,
+        "rl_steps_executed": int(rl_steps_done),
+        "sim_steps_executed": int(sim_steps_done),
         "batch_size": args.batch_size,
         "reward_mean": float(np.mean(reward_all)) if reward_all.size else float("nan"),
         "reward_std": float(np.std(reward_all)) if reward_all.size else float("nan"),
@@ -230,7 +248,7 @@ def main() -> None:
     with summary_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
-    print(f"Residual evaluation summary saved to: {summary_path}")
+    print(f"Full residual evaluation summary saved to: {summary_path}")
 
 
 if __name__ == "__main__":
