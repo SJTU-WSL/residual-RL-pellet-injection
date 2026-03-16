@@ -21,3 +21,4 @@ visualization/runs/
 plot/
 rl_logs/
 visualization/simulation data/
+rl_full_residual_lab/__pycache__/
