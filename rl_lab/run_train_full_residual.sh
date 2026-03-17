@@ -54,7 +54,7 @@ CMD=(
   --log-dir rl_logs
   --save-dir rl_models
   --run-name "${RUN_TS}"
-  --checkpoint-freq 50000
+  --checkpoint-freq 800_000
   --num-stack 1
   --log-interval 1
 )

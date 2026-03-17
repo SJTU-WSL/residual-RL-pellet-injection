@@ -7,9 +7,10 @@ class SafetyViolationError(RuntimeError):
 
 UNSAFE_TERMINATION_PENALTY = -10.0
 
+# ── Triple product ──
 TRIPLE_PRODUCT_REF = 3.0e21
-Q_TARGET = 5.0
 
+# ── Greenwald fraction (density safety) ──
 FGW_TARGET = 0.70
 FGW_SIGMA = 0.10
 FGW_LOW = 0.35
@@ -18,6 +19,7 @@ FGW_LOW_SCALE = 0.05
 FGW_HIGH_SCALE = 0.04
 FGW_ABORT = 1.00
 
+# ── Electron temperature (volume-averaged) ──
 TE_VOL_TARGET = 10.0
 TE_VOL_SIGMA = 3.0
 TE_VOL_LOW = 3.0
@@ -25,6 +27,7 @@ TE_VOL_HIGH = 18.0
 TE_VOL_LOW_SCALE = 1.0
 TE_VOL_HIGH_SCALE = 1.5
 
+# ── Ion temperature (volume-averaged) ──
 TI_VOL_TARGET = 12.0
 TI_VOL_SIGMA = 3.5
 TI_VOL_LOW = 3.0
@@ -179,37 +182,27 @@ def compute_reward(
     elif action.ndim == 1:
         action = action.reshape(batch_size, -1)
 
-    if action.shape[1] < 2:
-        raise ValueError(
-            f"当前 reward 假设 action 至少包含两维，[pellet_command, pellet_speed]，实际 shape={action.shape}"
-        )
-
     values = _extract_reward_inputs(info, batch_size)
     unsafe_mask, _unsafe_reasons = evaluate_unsafe_conditions(info, batch_size, values=values)
 
+    # ── clip to physical bounds ──
     fgw_n_e_volume_avg = np.clip(values["fgw_n_e_volume_avg"], 0.0, None)
-    P_fusion = np.clip(values["P_fusion"], 0.0, None)
     tau_E = np.clip(values["tau_E"], 1e-6, None)
-    Q_fusion = np.clip(values["Q_fusion"], 0.0, None)
-    P_external_total = np.clip(values["P_external_total"], 1e-6, None)
     n_e_volume_avg = np.clip(values["n_e_volume_avg"], 1e-12, None)
     T_e_volume_avg = np.clip(values["T_e_volume_avg"], 1e-6, None)
     T_i_volume_avg = np.clip(values["T_i_volume_avg"], 1e-6, None)
-    S_pellet = np.clip(values["S_pellet"], 0.0, None)
-    n_e_core = np.clip(values["n_e_core"], 1e-12, None)
-    T_e_core = np.clip(values["T_e_core"], 1e-6, None)
-    T_i_core = np.clip(values["T_i_core"], 1e-6, None)
 
+    # ════════════════════════════════════════════════════════════
+    #  1. Triple product  (weight ≈ 0.40)   — 核心聚变性能指标
+    # ════════════════════════════════════════════════════════════
     T_volume_avg = 0.5 * (T_e_volume_avg + T_i_volume_avg)
     triple_product = np.clip(n_e_volume_avg * T_volume_avg * tau_E, 0.0, None)
     _require_finite("triple_product", triple_product)
+    triple_reward = 0.40 * np.log1p(triple_product / TRIPLE_PRODUCT_REF)
 
-    triple_reward = 0.30 * np.log1p(triple_product / TRIPLE_PRODUCT_REF)
-
-    q_gain_reward = 0.20 * np.log1p(Q_fusion) / np.log1p(10.0)
-    q_target_reward = 0.20 * np.tanh((Q_fusion - Q_TARGET) / 1.5)
-    q_reward = q_gain_reward + q_target_reward
-
+    # ════════════════════════════════════════════════════════════
+    #  2. Density band — fGW centering  (weight ≈ 0.18)
+    # ════════════════════════════════════════════════════════════
     density_reward = _band_reward(
         fgw_n_e_volume_avg,
         target=FGW_TARGET,
@@ -218,11 +211,14 @@ def compute_reward(
         high=FGW_HIGH,
         low_scale=FGW_LOW_SCALE,
         high_scale=FGW_HIGH_SCALE,
-        w_pos=0.10,
-        w_low=0.18,
-        w_high=0.10,
+        w_pos=0.18,
+        w_low=0.25,
+        w_high=0.15,
     )
 
+    # ════════════════════════════════════════════════════════════
+    #  3. Electron temperature band  (weight ≈ 0.14)
+    # ════════════════════════════════════════════════════════════
     te_reward = _band_reward(
         T_e_volume_avg,
         target=TE_VOL_TARGET,
@@ -231,11 +227,14 @@ def compute_reward(
         high=TE_VOL_HIGH,
         low_scale=TE_VOL_LOW_SCALE,
         high_scale=TE_VOL_HIGH_SCALE,
-        w_pos=0.08,
-        w_low=0.16,
-        w_high=0.12,
+        w_pos=0.14,
+        w_low=0.20,
+        w_high=0.16,
     )
 
+    # ════════════════════════════════════════════════════════════
+    #  4. Ion temperature band  (weight ≈ 0.14)
+    # ════════════════════════════════════════════════════════════
     ti_reward = _band_reward(
         T_i_volume_avg,
         target=TI_VOL_TARGET,
@@ -244,28 +243,27 @@ def compute_reward(
         high=TI_VOL_HIGH,
         low_scale=TI_VOL_LOW_SCALE,
         high_scale=TI_VOL_HIGH_SCALE,
-        w_pos=0.08,
-        w_low=0.16,
-        w_high=0.12,
+        w_pos=0.14,
+        w_low=0.20,
+        w_high=0.16,
     )
 
+    # ════════════════════════════════════════════════════════════
+    #  5. Greenwald safety margin  (weight ≈ 0.14)
+    #     Gaussian 正奖励 @ 0.72 + 强 softplus 惩罚 > 0.90
+    # ════════════════════════════════════════════════════════════
     greenwald_reward = (
-        0.08 * np.exp(-0.5 * ((fgw_n_e_volume_avg - 0.72) / 0.10) ** 2)
-        - 0.30 * _softplus((fgw_n_e_volume_avg - 0.90) / 0.03)
+        0.14 * np.exp(-0.5 * ((fgw_n_e_volume_avg - 0.72) / 0.10) ** 2)
+        - 0.40 * _softplus((fgw_n_e_volume_avg - 0.90) / 0.03)
     )
 
-    pellet_speed = np.abs(action[:, 1])
-    pellet_usage_scale = np.log1p(S_pellet)
-    pellet_penalty = -0.006 * pellet_usage_scale - 0.004 * pellet_usage_scale * np.log1p(pellet_speed)
-
+    # ── total ──
     reward = (
         triple_reward
-        + q_reward
         + density_reward
         + te_reward
         + ti_reward
         + greenwald_reward
-        + pellet_penalty
     )
 
     _require_finite("reward", reward)

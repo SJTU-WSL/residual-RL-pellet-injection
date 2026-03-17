@@ -22,3 +22,5 @@ plot/
 rl_logs/
 visualization/simulation data/
 rl_full_residual_lab/__pycache__/
+simulator/src/eqdsk/__pycache__/
+baseline_sweep/eval_logs/

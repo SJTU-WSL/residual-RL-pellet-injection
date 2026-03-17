@@ -19,13 +19,19 @@
 - Warm-start training：训练默认先经过约 2 秒物理预热，再从稳定状态开始控制
 - Macro-step RL rollout：支持 `sim_steps_per_rl_step`，用单次策略决策驱动多个物理步
 - Batched simulation：底层环境原生支持 batch，并通过 SB3 适配为并行环境
-- Physics-aware reward：奖励结合三乘积、`Q_fusion`、密度/温度约束与注入代价
+- Physics-aware reward：奖励结合三乘积、密度/温度约束
 - Visualization workflow：提供 PyQt 可视化界面做并行仿真与结果查看
 
 ## Repository Layout
 
 - `rl_lab/`
   PPO 训练、评估和 full residual 环境封装
+
+- `rl_residual_lab/`
+  固定间隔残差 RL 训练/评估（velocity + thickness 残差）
+
+- `baseline_sweep/`
+  基线注入参数网格搜索（inject_every × velocity × thickness）
 
 - `RL/`
   通用 batch 环境、reward 和 VecEnv 适配器
@@ -65,7 +71,7 @@ python3 -m pip install -r requirement.txt
 
 ## Full Residual Environment
 
-full residual 环境定义在 [full_residual_env.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_lab/full_residual_env.py)。
+full residual 环境定义在 `rl_lab/full_residual_env.py`。
 
 ### Action Space
 
@@ -100,7 +106,7 @@ full residual 环境定义在 [full_residual_env.py](/Users/sheldonwang/residual
 
 ### Warm Start and Macro Steps
 
-训练默认先执行 `warmup_steps = 2000`。结合 [ITER.py](/Users/sheldonwang/residual-RL-pellet-injection/config/ITER.py) 中的 `fixed_dt = 0.001`，对应约 2 秒物理时间。
+训练默认先执行 `warmup_steps = 2000`。结合 `config/ITER.py` 中的 `fixed_dt = 0.001`，对应约 2 秒物理时间。
 
 预热结束后，环境缓存等离子体状态。训练 episode reset 时直接回到 warm-start 状态，从而减少冷启动瞬态对 PPO 的干扰。
 
@@ -108,7 +114,7 @@ full residual 环境定义在 [full_residual_env.py](/Users/sheldonwang/residual
 
 ### Observations
 
-基础观测由 [env.py](/Users/sheldonwang/residual-RL-pellet-injection/RL/env.py) 提供，会把输运状态和诊断输出展开为 `(B, D)` 的数值特征。
+基础观测由 `RL/env.py` 提供，会把输运状态和诊断输出展开为 `(B, D)` 的数值特征。
 
 启用 `--append-scheduler-features` 后，还会附加调度相关特征，包括：
 
@@ -121,13 +127,12 @@ full residual 环境定义在 [full_residual_env.py](/Users/sheldonwang/residual
 
 ### Reward and Safety
 
-奖励定义在 [reward.py](/Users/sheldonwang/residual-RL-pellet-injection/RL/reward.py)，主要考虑：
+奖励定义在 `RL/reward.py`，主要考虑：
 
-- 聚变三乘积 `n T tau_E`
-- `Q_fusion`
-- Greenwald fraction 约束
-- 电子/离子体平均温度范围
-- pellet 使用量和控制代价
+- 聚变三乘积 `n T tau_E`（权重 0.40）
+- Greenwald fraction 约束（权重 0.18 + 安全惩罚）
+- 电子/离子体平均温度范围（各 0.14）
+- Greenwald 安全裕度（0.14 正 / 0.40 罚）
 
 环境会对明显异常的状态提前终止，例如：
 
@@ -162,7 +167,7 @@ python3 Examples/interval_injiction.py --device cpu --batch-size 2 --run-steps 1
 
 ### PPO Training
 
-训练入口位于 [train_full_residual.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_lab/train_full_residual.py)。
+训练入口位于 `rl_lab/train_full_residual.py`。
 
 一个最小化示例：
 
@@ -185,6 +190,12 @@ python3 rl_lab/train_full_residual.py \
   --total-timesteps 10000
 ```
 
+固定间隔残差训练（仅学习 velocity + thickness 残差）：
+
+```bash
+bash rl_residual_lab/run_train_residual.sh
+```
+
 训练输出默认保存在：
 
 - `rl_logs/<run_name>/`
@@ -200,7 +211,7 @@ python3 rl_lab/train_full_residual.py \
 
 ### Policy Evaluation
 
-评估入口位于 [eval_full_residual.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_lab/eval_full_residual.py)。
+评估入口位于 `rl_lab/eval_full_residual.py`。
 
 评估一个训练好的模型：
 
@@ -221,6 +232,56 @@ python3 rl_lab/eval_full_residual.py \
 - `<run_name>_config.json`
 - `<run_name>_summary.json`
 
+## Baseline Parameter Sweep
+
+Grid search over baseline injection parameters to find the optimal fixed schedule
+before training the residual RL agent.
+
+### Quick Start
+
+```bash
+bash baseline_sweep/run_sweep.sh
+```
+
+### Manual Usage
+
+```bash
+# Run evaluation grid (CPU, supports --resume for checkpointing)
+python3 baseline_sweep/sweep_eval.py \
+  --device cpu --batch-size 16 \
+  --warmup-steps 2000 --control-steps 8000 \
+  --resume
+
+# Custom parameter grid
+python3 baseline_sweep/sweep_eval.py \
+  --inject-every-values 50,100,200 \
+  --velocity-values 200,300,400 \
+  --thickness-mm-values 1.5,2.0,3.0
+
+# Visualize results
+python3 baseline_sweep/sweep_visualize.py \
+  --csv baseline_sweep/eval_logs/sweep_summary.csv \
+  --top-n 20
+```
+
+### Default Grid (6×6×6 = 216 combinations)
+
+| Parameter | Values |
+|-----------|--------|
+| inject_every (steps) | 50, 75, 100, 125, 150, 200 |
+| velocity (m/s) | 150, 200, 250, 300, 400, 500 |
+| thickness (mm) | 1.0, 1.5, 2.0, 2.5, 3.0, 4.0 |
+
+### Output
+
+Results saved to `baseline_sweep/eval_logs/`:
+- `combo_ie{X}_v{Y}_t{Z}.json` — per-combination metrics
+- `sweep_summary.csv` — all combinations in one table
+- `sweep_config.json` — sweep configuration
+- `heatmap_*.png` — heatmap grids sliced by inject_every
+- `sweep_sensitivity.png` — marginal sensitivity curves
+- `sweep_top20.csv` — top 20 configurations ranked by reward
+
 ## Visualization
 
 启动桌面程序：
@@ -239,7 +300,7 @@ python3 visualization/app.py
 
 ## Default Configuration
 
-默认实验场景位于 [ITER.py](/Users/sheldonwang/residual-RL-pellet-injection/config/ITER.py)，当前包含：
+默认实验场景位于 `config/ITER.py`，当前包含：
 
 - `1 ms` 时间步长
 - `t_final = 100`
@@ -250,12 +311,16 @@ python3 visualization/app.py
 
 ## Main Entry Points
 
-- [train_full_residual.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_lab/train_full_residual.py)
-- [eval_full_residual.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_lab/eval_full_residual.py)
-- [full_residual_env.py](/Users/sheldonwang/residual-RL-pellet-injection/rl_lab/full_residual_env.py)
-- [env.py](/Users/sheldonwang/residual-RL-pellet-injection/RL/env.py)
-- [reward.py](/Users/sheldonwang/residual-RL-pellet-injection/RL/reward.py)
-- [app.py](/Users/sheldonwang/residual-RL-pellet-injection/visualization/app.py)
+- `rl_lab/train_full_residual.py`
+- `rl_lab/eval_full_residual.py`
+- `rl_lab/full_residual_env.py`
+- `rl_residual_lab/train_residual.py`
+- `rl_residual_lab/eval_residual.py`
+- `baseline_sweep/sweep_eval.py`
+- `baseline_sweep/sweep_visualize.py`
+- `RL/env.py`
+- `RL/reward.py`
+- `visualization/app.py`
 
 ## Acknowledgement
 
